@@ -3,10 +3,12 @@
   const RECORDS_KEY = "simple-timer-records";
   const POPUP_SIZE_KEY = "simple-timer-popup-size";
   const MINIMIZED_POPUP_SIZE_KEY = "simple-timer-minimized-popup-size";
+  const DEFAULT_MODE_KEY = "simple-timer-default-mode";
+  const AGGREGATION_ENABLED_KEY = "simple-timer-aggregation-enabled";
   const MODES = { COUNTDOWN: "countdown", STOPWATCH: "stopwatch" };
   const DEFAULT_COUNTDOWN_SECONDS = 25 * 60;
   const TICK_INTERVAL_MS = 250;
-  const POPUP_SIZE_LIMITS = { minWidth: 320, maxWidth: 720, minHeight: 190, maxHeight: 900 };
+  const POPUP_SIZE_LIMITS = { minWidth: 320, maxWidth: 720, minHeight: 120, maxHeight: 900 };
   const OPTIMAL_POPUP_MIN_HEIGHT = 360;
 
   const elements = {
@@ -16,7 +18,12 @@
     statusText: document.querySelector("#status-text"),
     recordDate: document.querySelector("#record-date"),
     toast: document.querySelector("#toast"),
+    previousDayConfirmOverlay: document.querySelector("#previous-day-confirm-overlay"),
+    previousDayConfirmMessage: document.querySelector("#previous-day-confirm-message"),
+    resetPreviousDayButton: document.querySelector("#reset-previous-day-button"),
+    recordPreviousDayButton: document.querySelector("#record-previous-day-button"),
     timeDisplay: document.querySelector("#time-display"),
+    cumulativeTimeDisplay: document.querySelector("#cumulative-time-display"),
     popupButton: document.querySelector("#popup-button"),
     minimizeButton: document.querySelector("#minimize-button"),
     historyButton: document.querySelector("#history-button"),
@@ -26,6 +33,8 @@
     resetPopupSizeButton: document.querySelector("#reset-popup-size-button"),
     minimizedPopupSizeStatus: document.querySelector("#minimized-popup-size-status"),
     resetMinimizedPopupSizeButton: document.querySelector("#reset-minimized-popup-size-button"),
+    defaultModeSelect: document.querySelector("#default-mode-select"),
+    aggregationEnabledInput: document.querySelector("#aggregation-enabled-input"),
     timerTabList: document.querySelector("#timer-tab-list"),
     addTimerTabButton: document.querySelector("#add-timer-tab-button"),
     timerTabConfirmOverlay: document.querySelector("#timer-tab-confirm-overlay"),
@@ -49,19 +58,23 @@
     taskButton: document.querySelector("#task-button"),
     taskNameDisplay: document.querySelector("#task-name-display"),
     taskInput: document.querySelector("#task-input"),
+    taskMemoInput: document.querySelector("#task-memo-input"),
     taskDialog: document.querySelector("#task-dialog"),
     taskDialogForm: document.querySelector("#task-dialog-form"),
     recentTaskList: document.querySelector("#recent-task-list"),
     manualRecentTaskList: document.querySelector("#manual-recent-task-list"),
     historyDialog: document.querySelector("#history-dialog"),
     historyDate: document.querySelector("#history-date"),
+    historyDateContext: document.querySelector("#history-date-context"),
     historyList: document.querySelector("#history-list"),
+    historySummary: document.querySelector("#history-summary"),
     addHistoryButton: document.querySelector("#add-history-button"),
     exportHistoryButton: document.querySelector("#export-history-button"),
     addHistoryDialog: document.querySelector("#add-history-dialog"),
     addHistoryForm: document.querySelector("#add-history-form"),
     manualDate: document.querySelector("#manual-date"),
     manualTaskInput: document.querySelector("#manual-task-input"),
+    manualMemoInput: document.querySelector("#manual-memo-input"),
     manualHoursInput: document.querySelector("#manual-hours-input"),
     manualMinutesInput: document.querySelector("#manual-minutes-input"),
     manualSecondsInput: document.querySelector("#manual-seconds-input"),
@@ -69,6 +82,7 @@
     editHistoryDialog: document.querySelector("#edit-history-dialog"),
     editHistoryForm: document.querySelector("#edit-history-form"),
     editTaskInput: document.querySelector("#edit-task-input"),
+    editMemoInput: document.querySelector("#edit-memo-input"),
     editHoursInput: document.querySelector("#edit-hours-input"),
     editMinutesInput: document.querySelector("#edit-minutes-input"),
     editSecondsInput: document.querySelector("#edit-seconds-input"),
@@ -81,8 +95,18 @@
     unitButtons: Array.from(document.querySelectorAll(".unit-button")),
     closeDialogButtons: Array.from(document.querySelectorAll(".close-dialog")),
     startPauseButton: document.querySelector("#start-pause-button"),
+    compactStartPauseButton: document.querySelector("#compact-start-pause-button"),
     resetButton: document.querySelector("#reset-button"),
+    resetConfirmOverlay: document.querySelector("#reset-confirm-overlay"),
+    resetConfirmMessage: document.querySelector("#reset-confirm-message"),
+    cancelResetButton: document.querySelector("#cancel-reset-button"),
+    confirmResetButton: document.querySelector("#confirm-reset-button"),
     nextTaskButton: document.querySelector("#next-task-button"),
+    resumeHistoryButton: document.querySelector("#resume-history-button"),
+    resumeHistoryConfirmDialog: document.querySelector("#resume-history-confirm-dialog"),
+    resumeHistoryConfirmMessage: document.querySelector("#resume-history-confirm-message"),
+    cancelResumeHistoryButton: document.querySelector("#cancel-resume-history-button"),
+    confirmResumeHistoryButton: document.querySelector("#confirm-resume-history-button"),
   };
 
   const state = {
@@ -90,8 +114,11 @@
     isRunning: false,
     startedAt: 0,
     elapsedBeforeStartMs: 0,
+    countdownSessionStartElapsedMs: 0,
     countdownDurationMs: DEFAULT_COUNTDOWN_SECONDS * 1000,
     taskName: "",
+    taskMemo: "",
+    firstStartedAt: 0,
     finishedAt: 0,
     hasStarted: false,
     isMinimized: false,
@@ -123,6 +150,11 @@
   let popupResizeSaveId = 0;
   let suppressPopupSizeSaveUntil = 0;
   let preMinimizePopupSize = null;
+  let activeStateDate = localDateKey();
+  let pendingNewDateKey = "";
+  let dateTimeIntervalId = 0;
+  let popupFitFrame = 0;
+  let popupFitSignature = "";
 
   function localDateKey(date = new Date()) {
     const year = date.getFullYear();
@@ -132,6 +164,15 @@
   }
 
   function updateDateTime(date = new Date()) {
+    const dateKey = localDateKey(date);
+    if (dateKey !== activeStateDate && state.timerTabs.length && !pendingNewDateKey) {
+      const hasPreviousDayWork = state.timerTabs.some((tab) => {
+        const elapsedMs = tab.id === state.activeTimerId ? getElapsedMs() : tab.elapsedBeforeStartMs;
+        return elapsedMs > 0;
+      });
+      if (hasPreviousDayWork) openPreviousDayConfirm(dateKey);
+      else resetTimersForNewDay(dateKey, false);
+    }
     const currentSecond = Math.floor(date.getTime() / 1000);
     if (currentSecond === displayedClockSecond) return;
     displayedClockSecond = currentSecond;
@@ -144,20 +185,87 @@
     const hours = String(date.getHours()).padStart(2, "0");
     const minutes = String(date.getMinutes()).padStart(2, "0");
     const seconds = String(date.getSeconds()).padStart(2, "0");
-    const firstColon = document.createElement("span");
-    const secondColon = document.createElement("span");
-    const colonClassName = date.getSeconds() % 2 === 0 ? "clock-colon" : "clock-colon is-hidden";
-    firstColon.className = colonClassName;
-    secondColon.className = colonClassName;
-    firstColon.textContent = ":";
-    secondColon.textContent = ":";
-    elements.recordDate.replaceChildren(
-      document.createTextNode(`${dateText}(${weekdays[date.getDay()]}) ${hours}`),
-      firstColon,
-      document.createTextNode(minutes),
-      secondColon,
-      document.createTextNode(seconds),
-    );
+    elements.recordDate.textContent = `${dateText}(${weekdays[date.getDay()]}) ${hours}:${minutes}:${seconds}`;
+  }
+
+  function resetTimersForNewDay(dateKey = localDateKey(), notify = true) {
+    stopTicking();
+    const firstTab = createTimerTab(1);
+    state.timerTabs = [firstTab];
+    state.nextTimerNumber = 2;
+    applyTimerTab(firstTab);
+    activeStateDate = dateKey;
+    timerTabsSignature = "";
+    syncInputsFromDuration();
+    saveState();
+    render();
+    if (notify) showToast("前日分の計測途中データをリセットしました");
+  }
+
+  function startDateTimeUpdates() {
+    if (dateTimeIntervalId || pendingNewDateKey) return;
+    dateTimeIntervalId = window.setInterval(updateDateTime, 1000);
+  }
+
+  function stopDateTimeUpdates() {
+    if (!dateTimeIntervalId) return;
+    window.clearInterval(dateTimeIntervalId);
+    dateTimeIntervalId = 0;
+  }
+
+  function openPreviousDayConfirm(newDateKey) {
+    if (state.isRunning) {
+      state.elapsedBeforeStartMs = getElapsedMs();
+      state.isRunning = false;
+      state.startedAt = 0;
+      stopTicking();
+    }
+    snapshotActiveTimer();
+    saveState();
+    pendingNewDateKey = newDateKey;
+    stopDateTimeUpdates();
+    const totalMs = state.timerTabs.reduce((total, tab) => total + Math.max(0, tab.elapsedBeforeStartMs), 0);
+    elements.previousDayConfirmMessage.textContent =
+      `${formatHistoryDateLabel(activeStateDate)}の作業時間 ${formatTime(totalMs)} が残っています。`;
+    elements.previousDayConfirmOverlay.hidden = false;
+    elements.recordPreviousDayButton.focus();
+  }
+
+  function finishPreviousDayResolution(message) {
+    const newDateKey = pendingNewDateKey || localDateKey();
+    pendingNewDateKey = "";
+    elements.previousDayConfirmOverlay.hidden = true;
+    resetTimersForNewDay(newDateKey, false);
+    updateDateTime();
+    startDateTimeUpdates();
+    showToast(message);
+  }
+
+  function resetPreviousDayWork() {
+    finishPreviousDayResolution("前日分の作業時間をリセットしました");
+  }
+
+  function recordPreviousDayWork() {
+    const [year, month, day] = activeStateDate.split("-").map(Number);
+    const endOfSavedDate = new Date(year, month - 1, day + 1).getTime() - 1;
+    const addedAt = Number.isFinite(endOfSavedDate) ? endOfSavedDate : now();
+    state.timerTabs.forEach((tab) => {
+      if (tab.elapsedBeforeStartMs <= 0) return;
+      state.records.push({
+        id: `${now()}-${Math.random().toString(16).slice(2)}`,
+        date: activeStateDate,
+        taskName: normalizeTaskName(tab.taskName) || `タイマー ${tab.number}`,
+        memo: typeof tab.taskMemo === "string" ? tab.taskMemo : "",
+        durationMs: Math.round(tab.elapsedBeforeStartMs),
+        mode: tab.mode,
+        firstStartedAt: Number.isFinite(tab.firstStartedAt) && tab.firstStartedAt > 0
+          ? new Date(tab.firstStartedAt).toISOString()
+          : undefined,
+        createdAt: new Date(addedAt).toISOString(),
+      });
+    });
+    saveRecords();
+    finishPreviousDayResolution("前日分を作業履歴に追加しました");
   }
 
   function formatHistoryDateLabel(dateKey) {
@@ -173,15 +281,23 @@
     return {
       id: `${now()}-${Math.random().toString(16).slice(2)}`,
       number,
-      mode: MODES.COUNTDOWN,
+      mode: getDefaultMode(),
       isRunning: false,
       startedAt: 0,
       elapsedBeforeStartMs: 0,
+      countdownSessionStartElapsedMs: 0,
       countdownDurationMs: DEFAULT_COUNTDOWN_SECONDS * 1000,
       taskName: "",
+      taskMemo: "",
+      firstStartedAt: 0,
       finishedAt: 0,
       hasStarted: false,
     };
+  }
+
+  function getDefaultMode() {
+    const savedMode = localStorage.getItem(DEFAULT_MODE_KEY);
+    return Object.values(MODES).includes(savedMode) ? savedMode : MODES.COUNTDOWN;
   }
 
   function isValidTimerTab(tab) {
@@ -199,8 +315,11 @@
     tab.isRunning = state.isRunning;
     tab.startedAt = state.startedAt;
     tab.elapsedBeforeStartMs = getElapsedMs();
+    tab.countdownSessionStartElapsedMs = state.countdownSessionStartElapsedMs;
     tab.countdownDurationMs = state.countdownDurationMs;
     tab.taskName = state.taskName;
+    tab.taskMemo = state.taskMemo;
+    tab.firstStartedAt = state.firstStartedAt;
     tab.finishedAt = state.finishedAt;
     tab.hasStarted = state.hasStarted;
   }
@@ -211,8 +330,13 @@
     state.isRunning = false;
     state.startedAt = 0;
     state.elapsedBeforeStartMs = tab.elapsedBeforeStartMs;
+    state.countdownSessionStartElapsedMs = Number.isFinite(tab.countdownSessionStartElapsedMs)
+      ? Math.min(tab.countdownSessionStartElapsedMs, tab.elapsedBeforeStartMs)
+      : 0;
     state.countdownDurationMs = tab.countdownDurationMs;
     state.taskName = tab.taskName;
+    state.taskMemo = typeof tab.taskMemo === "string" ? tab.taskMemo : "";
+    state.firstStartedAt = Number.isFinite(tab.firstStartedAt) ? tab.firstStartedAt : 0;
     state.finishedAt = tab.finishedAt || 0;
     state.hasStarted = tab.hasStarted === true;
   }
@@ -220,6 +344,8 @@
   function loadState() {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      const isFromToday = typeof saved.savedDate !== "string" || saved.savedDate === localDateKey();
+      if (typeof saved.savedDate === "string") activeStateDate = saved.savedDate;
       const savedTabs = Array.isArray(saved.timerTabs) ? saved.timerTabs.filter(isValidTimerTab) : [];
       if (savedTabs.length) {
         state.timerTabs = savedTabs.map((tab) => ({
@@ -227,6 +353,9 @@
           taskName: tab.taskName.slice(0, 80),
           isRunning: false,
           startedAt: 0,
+          countdownSessionStartElapsedMs: Number.isFinite(tab.countdownSessionStartElapsedMs)
+            ? Math.min(tab.countdownSessionStartElapsedMs, tab.elapsedBeforeStartMs)
+            : 0,
           hasStarted: tab.hasStarted === true || tab.elapsedBeforeStartMs > 0 || tab.finishedAt > 0,
         }));
         state.nextTimerNumber = Math.max(...state.timerTabs.map((tab) => tab.number)) + 1;
@@ -234,14 +363,17 @@
         applyTimerTab(activeTab);
       } else {
         const firstTab = createTimerTab(1);
-        if (Object.values(MODES).includes(saved.mode)) firstTab.mode = saved.mode;
-        if (Number.isFinite(saved.countdownDurationMs) && saved.countdownDurationMs > 0) {
-          firstTab.countdownDurationMs = saved.countdownDurationMs;
+        if (isFromToday) {
+          if (Object.values(MODES).includes(saved.mode)) firstTab.mode = saved.mode;
+          if (Number.isFinite(saved.countdownDurationMs) && saved.countdownDurationMs > 0) {
+            firstTab.countdownDurationMs = saved.countdownDurationMs;
+          }
+          if (typeof saved.taskName === "string") firstTab.taskName = saved.taskName.slice(0, 80);
         }
-        if (typeof saved.taskName === "string") firstTab.taskName = saved.taskName.slice(0, 80);
         state.timerTabs = [firstTab];
         state.nextTimerNumber = 2;
         applyTimerTab(firstTab);
+        if (!isFromToday) activeStateDate = localDateKey();
       }
       loadRecords();
     } catch {
@@ -257,6 +389,7 @@
   function saveState() {
     snapshotActiveTimer();
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      savedDate: activeStateDate,
       activeTimerId: state.activeTimerId,
       nextTimerNumber: state.nextTimerNumber,
       timerTabs: state.timerTabs,
@@ -274,7 +407,11 @@
       state.records = records.filter((record) =>
         record && typeof record.taskName === "string" && typeof record.date === "string" &&
         Number.isFinite(record.durationMs) && record.durationMs > 0,
-      );
+      ).map((record) => ({
+        ...record,
+        taskName: normalizeTaskName(record.taskName),
+        memo: typeof record.memo === "string" ? record.memo.slice(0, 300) : "",
+      }));
     } catch {
       localStorage.removeItem(RECORDS_KEY);
       state.records = [];
@@ -290,14 +427,17 @@
   }
 
   function getRecordedElapsedMs() {
-    const elapsed = getElapsedMs();
-    return state.mode === MODES.COUNTDOWN ? Math.min(state.countdownDurationMs, elapsed) : elapsed;
+    return getElapsedMs();
+  }
+
+  function getCountdownSessionElapsedMs() {
+    return Math.max(0, getElapsedMs() - state.countdownSessionStartElapsedMs);
   }
 
   function getDisplayMs() {
     return state.mode === MODES.STOPWATCH
       ? getElapsedMs()
-      : Math.max(0, state.countdownDurationMs - getElapsedMs());
+      : Math.max(0, state.countdownDurationMs - getCountdownSessionElapsedMs());
   }
 
   function normalizeSeconds(value, fallback) {
@@ -334,6 +474,84 @@
     return formatTime(milliseconds);
   }
 
+  function normalizeTaskName(value) {
+    return value.trim().replace(/\s+/g, " ").slice(0, 80);
+  }
+
+  function taskNameDistance(left, right) {
+    const a = Array.from(left.toLocaleLowerCase("ja"));
+    const b = Array.from(right.toLocaleLowerCase("ja"));
+    const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+    for (let row = 0; row < a.length; row += 1) {
+      const current = [row + 1];
+      for (let column = 0; column < b.length; column += 1) {
+        current.push(Math.min(
+          current[column] + 1,
+          previous[column + 1] + 1,
+          previous[column] + (a[row] === b[column] ? 0 : 1),
+        ));
+      }
+      previous.splice(0, previous.length, ...current);
+    }
+    return previous[b.length];
+  }
+
+  function existingTaskNames() {
+    const names = [];
+    [...state.records.map((record) => record.taskName), ...state.timerTabs.map((tab) => tab.taskName)]
+      .map(normalizeTaskName)
+      .filter(Boolean)
+      .forEach((name) => {
+        if (!names.some((existing) => existing.toLocaleLowerCase("ja") === name.toLocaleLowerCase("ja"))) names.push(name);
+      });
+    return names;
+  }
+
+  function resolveTaskName(name) {
+    const normalizedName = normalizeTaskName(name);
+    if (!normalizedName || !isAggregationEnabled()) return normalizedName;
+    const comparableName = normalizedName.toLocaleLowerCase("ja");
+    const names = existingTaskNames();
+    const exactMatch = names.find((existing) => existing.toLocaleLowerCase("ja") === comparableName);
+    if (exactMatch) return exactMatch;
+    const similarName = names
+      .map((existing) => {
+        const comparableExisting = existing.toLocaleLowerCase("ja");
+        const maximumLength = Math.max(Array.from(comparableName).length, Array.from(comparableExisting).length);
+        const distance = taskNameDistance(comparableName, comparableExisting);
+        const contains = Math.min(Array.from(comparableName).length, Array.from(comparableExisting).length) >= 3 &&
+          (comparableName.includes(comparableExisting) || comparableExisting.includes(comparableName));
+        return { existing, distance, maximumLength, contains };
+      })
+      .filter((candidate) => candidate.contains || candidate.distance <= Math.max(1, Math.floor(candidate.maximumLength * 0.25)))
+      .sort((a, b) => a.distance - b.distance)[0];
+    if (!similarName) return normalizedName;
+    const shouldUnify = elements.app.ownerDocument.defaultView.confirm(
+      `入力した「${normalizedName}」は、既存の「${similarName.existing}」と似ています。\n\n` +
+      "同じタスクとして既存名に統一しますか？\nOK：既存名に統一 ／ キャンセル：別タスクとして使用",
+    );
+    return shouldUnify ? similarName.existing : normalizedName;
+  }
+
+  function isAggregationEnabled() {
+    return localStorage.getItem(AGGREGATION_ENABLED_KEY) === "true";
+  }
+
+  function formatHistoryClock(date) {
+    return new Intl.DateTimeFormat("ja-JP", {
+      hour: "numeric", minute: "2-digit", hour12: false,
+    }).format(date);
+  }
+
+  function formatHistoryTimeRange(record) {
+    const addedAt = new Date(record.createdAt);
+    if (Number.isNaN(addedAt.getTime())) return "";
+    const storedStartedAt = new Date(record.firstStartedAt);
+    return record.mode === "manual" || Number.isNaN(storedStartedAt.getTime())
+      ? `～${formatHistoryClock(addedAt)}`
+      : `${formatHistoryClock(storedStartedAt)}～${formatHistoryClock(addedAt)}`;
+  }
+
   function displayWidth(value) {
     return Array.from(value).reduce((width, character) => {
       return width + (/^[\x20-\x7E]$/.test(character) ? 1 : 2);
@@ -346,6 +564,45 @@
 
   function getCurrentBody() { return elements.app.ownerDocument.body; }
   function isPopupContext() { return getCurrentBody().classList.contains("is-popup"); }
+
+  function fitPopupContentToWindow() {
+    if (!isPopupContext()) {
+      elements.app.style.zoom = "";
+      elements.app.style.width = "";
+      elements.app.style.maxWidth = "";
+      popupFitSignature = "";
+      return;
+    }
+    const view = elements.app.ownerDocument.defaultView;
+    const signature = JSON.stringify([
+      view.innerWidth,
+      state.isMinimized,
+      state.mode,
+      state.finishedAt > 0,
+      state.timerTabs.length,
+      elements.app.ownerDocument.querySelectorAll("dialog[open]").length,
+    ]);
+    if (signature === popupFitSignature) return;
+    popupFitSignature = signature;
+    elements.app.style.zoom = "1";
+    elements.app.style.width = "100%";
+    elements.app.style.maxWidth = "none";
+    const baseWidth = state.isMinimized ? 320 : 430;
+    const widthScale = (view.innerWidth - 2) / baseWidth;
+    const scale = clamp(Math.min(1, widthScale), 0.25, 1);
+    // 縮小時は基準幅のレイアウト全体を一度だけ拡縮する。
+    // 描画後の幅は baseWidth * scale となり、PiPの横幅に収まる。
+    elements.app.style.width = scale < 0.995 ? `${baseWidth}px` : "100%";
+    elements.app.style.zoom = scale < 0.995 ? scale.toFixed(3) : "1";
+    getCurrentBody().classList.toggle("is-content-scaled", scale < 0.995);
+  }
+
+  function scheduleFitPopupContent() {
+    if (!isPopupContext()) return;
+    const view = elements.app.ownerDocument.defaultView;
+    view.cancelAnimationFrame(popupFitFrame);
+    popupFitFrame = view.requestAnimationFrame(fitPopupContentToWindow);
+  }
 
   function clamp(value, minimum, maximum) {
     return Math.min(maximum, Math.max(minimum, value));
@@ -394,17 +651,28 @@
   }
 
   function calculateOptimalMinimizedPopupSize(view = window) {
+    const previousZoom = elements.app.style.zoom;
+    elements.app.style.zoom = "1";
     const screen = view.screen || window.screen;
     const availableWidth = Number.isFinite(screen.availWidth) ? screen.availWidth - 32 : POPUP_SIZE_LIMITS.maxWidth;
     const availableHeight = Number.isFinite(screen.availHeight) ? screen.availHeight - 48 : POPUP_SIZE_LIMITS.maxHeight;
     const appStyle = view.getComputedStyle(elements.app);
-    const headerHeight = Math.ceil(elements.app.querySelector(".app-header").getBoundingClientRect().height);
+    const header = elements.app.querySelector(".app-header");
+    const headerHeight = Math.ceil(header.getBoundingClientRect().height);
     const verticalPadding = (Number.parseFloat(appStyle.paddingTop) || 0) + (Number.parseFloat(appStyle.paddingBottom) || 0);
-    const contentHeight = headerHeight + verticalPadding + 92;
-    return {
-      width: Math.round(clamp(320, POPUP_SIZE_LIMITS.minWidth, Math.min(POPUP_SIZE_LIMITS.maxWidth, availableWidth))),
+    const horizontalPadding = (Number.parseFloat(appStyle.paddingLeft) || 0) + (Number.parseFloat(appStyle.paddingRight) || 0);
+    const isCurrentlyMinimized = state.isMinimized && isPopupContext();
+    const timerHeight = isCurrentlyMinimized
+      ? elements.timeDisplay.getBoundingClientRect().height + elements.cumulativeTimeDisplay.getBoundingClientRect().height
+      : 96;
+    const contentHeight = headerHeight + timerHeight + verticalPadding + 4;
+    const contentWidth = isCurrentlyMinimized ? header.scrollWidth + horizontalPadding : 360;
+    const size = {
+      width: Math.round(clamp(contentWidth, POPUP_SIZE_LIMITS.minWidth, Math.min(POPUP_SIZE_LIMITS.maxWidth, availableWidth))),
       height: Math.round(clamp(contentHeight, POPUP_SIZE_LIMITS.minHeight, Math.min(POPUP_SIZE_LIMITS.maxHeight, availableHeight))),
     };
+    elements.app.style.zoom = previousZoom;
+    return size;
   }
 
   function fitPopupSizeToScreen(size, view = window) {
@@ -447,6 +715,8 @@
   }
 
   function openSettingsDialog() {
+    elements.defaultModeSelect.value = getDefaultMode();
+    elements.aggregationEnabledInput.checked = isAggregationEnabled();
     updatePopupSizeSettings();
     elements.settingsDialog.showModal();
   }
@@ -707,6 +977,9 @@
   function updateStatus() {
     if (state.finishedAt) elements.statusText.textContent = "完了";
     else if (state.isRunning) elements.statusText.textContent = state.mode === MODES.COUNTDOWN ? "集中時間を計測中" : "作業時間を計測中";
+    else if (state.mode === MODES.COUNTDOWN && state.elapsedBeforeStartMs > 0 && getCountdownSessionElapsedMs() === 0) {
+      elements.statusText.textContent = "作業時間を保持して待機中";
+    }
     else if (state.elapsedBeforeStartMs > 0) elements.statusText.textContent = "一時停止中";
     else elements.statusText.textContent = "待機中";
   }
@@ -734,6 +1007,7 @@
   function fitControlButtonText() {
     fitButtonText(elements.startPauseButton);
     fitButtonText(elements.nextTaskButton);
+    fitButtonText(elements.compactStartPauseButton);
   }
 
   function scheduleFitControlButtonText() {
@@ -742,18 +1016,39 @@
     fitButtonsFrame = view.requestAnimationFrame(fitControlButtonText);
   }
 
+  function updateDocumentTitle() {
+    const title = state.taskName.trim() || "Simple Timer";
+    document.title = title;
+    const currentDocument = elements.app.ownerDocument;
+    if (currentDocument !== document) currentDocument.title = title;
+  }
+
   function render() {
     if (state.mode === MODES.COUNTDOWN && state.isRunning && getDisplayMs() <= 0) {
       finishCountdown();
       return;
     }
+    updateDocumentTitle();
     elements.taskNameDisplay.textContent = state.taskName || "タスク名を入力";
     elements.timeDisplay.textContent = formatTime(getDisplayMs(), state.mode === MODES.COUNTDOWN ? "ceil" : "floor");
-    elements.startPauseButton.textContent = isFinishedCountdown()
-      ? "次の作業に移る\n（履歴へ追加）"
+    elements.cumulativeTimeDisplay.hidden = state.mode !== MODES.COUNTDOWN;
+    elements.cumulativeTimeDisplay.textContent = `作業時間 ${formatTime(getElapsedMs())}`;
+    const canResumeCurrentSession = state.mode === MODES.STOPWATCH
+      ? state.elapsedBeforeStartMs > 0
+      : getCountdownSessionElapsedMs() > 0;
+    const primaryActionLabel = isFinishedCountdown()
+      ? "同じタスクで計測"
       : state.isRunning
         ? "一時停止"
-        : state.elapsedBeforeStartMs > 0
+        : canResumeCurrentSession
+          ? "再開"
+          : "開始";
+    elements.startPauseButton.textContent = primaryActionLabel;
+    elements.compactStartPauseButton.textContent = isFinishedCountdown()
+      ? "追加設定"
+      : state.isRunning
+        ? "一時停止"
+        : canResumeCurrentSession
           ? "再開"
           : "開始";
     elements.panel.classList.toggle("is-finished", state.finishedAt > 0);
@@ -763,6 +1058,7 @@
     updateModeUi();
     updateStatus();
     scheduleFitControlButtonText();
+    scheduleFitPopupContent();
   }
 
   function startTimer() {
@@ -774,13 +1070,16 @@
     });
     if (state.mode === MODES.COUNTDOWN) {
       state.countdownDurationMs = getDurationFromInputs();
-      if (state.finishedAt || state.elapsedBeforeStartMs >= state.countdownDurationMs) state.elapsedBeforeStartMs = 0;
+      if (state.finishedAt || getCountdownSessionElapsedMs() >= state.countdownDurationMs) {
+        state.countdownSessionStartElapsedMs = getElapsedMs();
+      }
       syncInputsFromDuration();
     }
     state.finishedAt = 0;
     state.hasStarted = true;
     state.isRunning = true;
     state.startedAt = now();
+    if (!state.firstStartedAt) state.firstStartedAt = state.startedAt;
     saveState();
     startTicking();
     render();
@@ -796,9 +1095,18 @@
     render();
   }
 
+  function prepareAdditionalCountdown() {
+    if (!isFinishedCountdown()) return;
+    state.countdownSessionStartElapsedMs = getElapsedMs();
+    state.finishedAt = 0;
+    saveState();
+    render();
+    elements.statusText.textContent = "追加する時間を選択して開始してください";
+  }
+
   function toggleTimer() {
     if (isFinishedCountdown()) {
-      moveToNextTask();
+      prepareAdditionalCountdown();
       return;
     }
     if (state.isRunning) {
@@ -824,9 +1132,12 @@
     state.isRunning = false;
     state.startedAt = 0;
     state.elapsedBeforeStartMs = 0;
+    state.countdownSessionStartElapsedMs = 0;
     state.finishedAt = 0;
     state.hasStarted = false;
     state.taskName = "";
+    state.taskMemo = "";
+    state.firstStartedAt = 0;
     stopTicking();
     if (state.mode === MODES.COUNTDOWN) {
       state.countdownDurationMs = getDurationFromInputs();
@@ -836,8 +1147,34 @@
     render();
   }
 
+  function requestResetTimer() {
+    const elapsedMs = getElapsedMs();
+    if (elapsedMs <= 0) {
+      resetTimer();
+      return;
+    }
+    elements.resetConfirmMessage.textContent = `現在の作業時間は ${formatTime(elapsedMs)} です。`;
+    elements.resetConfirmOverlay.hidden = false;
+    elements.confirmResetButton.focus();
+  }
+
+  function closeResetConfirm() {
+    elements.resetConfirmOverlay.hidden = true;
+    elements.resetButton.focus();
+  }
+
+  function confirmResetTimer() {
+    elements.resetConfirmOverlay.hidden = true;
+    resetTimer();
+    showToast("履歴に追加せずリセットしました");
+  }
+
+  function isResetConfirmOpen() {
+    return !elements.resetConfirmOverlay.hidden;
+  }
+
   function finishCountdown() {
-    state.elapsedBeforeStartMs = state.countdownDurationMs;
+    state.elapsedBeforeStartMs = state.countdownSessionStartElapsedMs + state.countdownDurationMs;
     state.isRunning = false;
     state.startedAt = 0;
     state.finishedAt = now();
@@ -850,13 +1187,16 @@
 
   function performModeSwitch(mode) {
     if (state.mode === mode) return;
-    if (state.isRunning) stopTicking();
+    if (state.isRunning) {
+      state.elapsedBeforeStartMs = getElapsedMs();
+      stopTicking();
+    }
     state.isRunning = false;
     state.startedAt = 0;
     state.mode = mode;
-    state.elapsedBeforeStartMs = 0;
+    state.countdownSessionStartElapsedMs = state.elapsedBeforeStartMs;
     state.finishedAt = 0;
-    state.hasStarted = false;
+    state.hasStarted = state.elapsedBeforeStartMs > 0;
     saveState();
     render();
   }
@@ -887,7 +1227,9 @@
     modeSwitchConfirmPreviousFocus = elements.app.ownerDocument.activeElement;
     const modeName = mode === MODES.COUNTDOWN ? "カウントダウン" : "ストップウォッチ";
     elements.modeSwitchConfirmMessage.textContent =
-      `現在の計測時間を破棄して「${modeName}」へ切り替えてもよろしいですか？`;
+      state.isRunning
+        ? `現在の作業時間を維持し、動作中のタイマーを一時停止して「${modeName}」へ切り替えてもよろしいですか？`
+        : `現在の作業時間を維持したまま「${modeName}」へ切り替えてもよろしいですか？`;
     elements.modeSwitchConfirmOverlay.hidden = false;
     elements.confirmModeSwitchButton.focus();
   }
@@ -897,10 +1239,16 @@
   }
 
   function setCountdownDuration(seconds) {
+    if (state.isRunning) {
+      state.elapsedBeforeStartMs = getElapsedMs();
+      state.isRunning = false;
+      state.startedAt = 0;
+      stopTicking();
+    }
     state.countdownDurationMs = seconds * 1000;
-    state.elapsedBeforeStartMs = 0;
+    state.countdownSessionStartElapsedMs = state.elapsedBeforeStartMs;
     state.finishedAt = 0;
-    state.hasStarted = false;
+    state.hasStarted = state.elapsedBeforeStartMs > 0;
     syncInputsFromDuration();
     saveState();
     render();
@@ -926,9 +1274,11 @@
   function recentTaskNames() {
     const names = [];
     [...state.records].reverse().forEach((record) => {
-      if (!names.includes(record.taskName)) names.push(record.taskName);
+      const taskName = normalizeTaskName(record.taskName);
+      if (taskName && !names.includes(taskName)) names.push(taskName);
     });
-    if (state.taskName && !names.includes(state.taskName)) names.unshift(state.taskName);
+    const currentTaskName = normalizeTaskName(state.taskName);
+    if (currentTaskName && !names.includes(currentTaskName)) names.unshift(currentTaskName);
     return names.slice(0, 10);
   }
 
@@ -956,13 +1306,15 @@
   function openTaskDialog(recordAfterInput = false) {
     pendingRecordAfterTaskInput = recordAfterInput === true;
     elements.taskInput.value = state.taskName;
+    elements.taskMemoInput.value = state.taskMemo;
     renderRecentTasks(elements.recentTaskList, elements.taskInput);
     elements.taskDialog.showModal();
     window.setTimeout(() => elements.taskInput.focus(), 0);
   }
 
-  function setTaskName(name) {
-    state.taskName = name.trim().slice(0, 80);
+  function setTask(name, memo = "") {
+    state.taskName = resolveTaskName(name);
+    state.taskMemo = memo.trim().slice(0, 300);
     saveState();
     render();
   }
@@ -987,17 +1339,21 @@
       elements.statusText.textContent = "1秒以上計測してから記録してください";
       return;
     }
+    const addedAt = now();
     state.records.push({
-      id: `${now()}-${Math.random().toString(16).slice(2)}`,
+      id: `${addedAt}-${Math.random().toString(16).slice(2)}`,
       date: localDateKey(),
       taskName: state.taskName.trim(),
+      memo: state.taskMemo,
       durationMs: Math.round(durationMs),
       mode: state.mode,
-      createdAt: new Date().toISOString(),
+      firstStartedAt: new Date(state.firstStartedAt || addedAt - durationMs).toISOString(),
+      createdAt: new Date(addedAt).toISOString(),
     });
     saveRecords();
     resetTimer();
     state.taskName = "";
+    state.taskMemo = "";
     saveState();
     render();
     elements.statusText.textContent = "今日の作業として記録しました";
@@ -1006,7 +1362,12 @@
 
   function renderHistory() {
     const records = state.records.filter((record) => record.date === elements.historyDate.value);
+    const isViewingToday = elements.historyDate.value === localDateKey();
+    elements.historyDialog.classList.toggle("is-viewing-past", !isViewingToday);
+    elements.historyDateContext.hidden = isViewingToday;
+    elements.addHistoryButton.hidden = !isViewingToday;
     elements.unitButtons.forEach((button) => button.classList.toggle("is-active", button.dataset.unit === state.historyUnit));
+    renderHistorySummary(records);
     elements.historyList.replaceChildren();
     if (!records.length) {
       const empty = document.createElement("p");
@@ -1019,14 +1380,49 @@
       const item = document.createElement("button");
       item.type = "button";
       item.className = "history-item";
-      const task = document.createElement("span");
+      const details = document.createElement("span");
+      details.className = "history-item-details";
+      const task = document.createElement("strong");
       const duration = document.createElement("span");
       task.textContent = record.taskName;
+      const metadata = document.createElement("small");
+      metadata.className = "history-item-meta";
+      const timeRange = formatHistoryTimeRange(record);
+      metadata.textContent = [timeRange, record.memo || ""].filter(Boolean).join(" ／ ");
+      details.append(task);
+      if (metadata.textContent) details.append(metadata);
       duration.textContent = formatRecordDuration(record.durationMs);
-      item.append(task, duration);
+      item.append(details, duration);
       item.addEventListener("click", () => openEditHistoryDialog(record));
       elements.historyList.append(item);
     });
+  }
+
+  function renderHistorySummary(records) {
+    const enabled = isAggregationEnabled();
+    elements.historySummary.hidden = !enabled || !records.length;
+    elements.historySummary.replaceChildren();
+    if (!enabled || !records.length) return;
+    const heading = document.createElement("h3");
+    heading.textContent = "タスク別集計";
+    elements.historySummary.append(heading);
+    const totals = new Map();
+    records.forEach((record) => {
+      const taskName = normalizeTaskName(record.taskName);
+      totals.set(taskName, (totals.get(taskName) || 0) + record.durationMs);
+    });
+    [...totals.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "ja"))
+      .forEach(([taskName, durationMs]) => {
+        const row = document.createElement("div");
+        row.className = "history-summary-row";
+        const name = document.createElement("span");
+        const duration = document.createElement("strong");
+        name.textContent = taskName;
+        duration.textContent = formatRecordDuration(durationMs);
+        row.append(name, duration);
+        elements.historySummary.append(row);
+      });
   }
 
   function renderHistoryDateOptions(preferredDate = elements.historyDate.value) {
@@ -1045,11 +1441,13 @@
 
   function openEditHistoryDialog(record) {
     editingRecord = record;
+    elements.resumeHistoryButton.hidden = record.date !== localDateKey();
     const totalSeconds = Math.round(record.durationMs / 1000);
     elements.editHoursInput.value = String(Math.floor(totalSeconds / 3600));
     elements.editMinutesInput.value = String(Math.floor((totalSeconds % 3600) / 60));
     elements.editSecondsInput.value = String(totalSeconds % 60);
     elements.editTaskInput.value = record.taskName;
+    elements.editMemoInput.value = record.memo || "";
     elements.editHistoryError.textContent = "";
     elements.editHistoryDialog.showModal();
     window.setTimeout(() => elements.editTaskInput.focus(), 0);
@@ -1058,7 +1456,7 @@
   function updateHistoryRecord(event) {
     event.preventDefault();
     if (!editingRecord) return;
-    const taskName = elements.editTaskInput.value.trim();
+    const taskName = resolveTaskName(elements.editTaskInput.value);
     const durationMs = normalizeDurationInputs(
       [elements.editHoursInput, elements.editMinutesInput, elements.editSecondsInput],
       elements.editHistoryError,
@@ -1072,12 +1470,56 @@
       elements.editHistoryError.textContent = "作業時間を1秒以上入力してください";
       return;
     }
-    editingRecord.taskName = taskName.slice(0, 80);
+    editingRecord.taskName = taskName;
+    editingRecord.memo = elements.editMemoInput.value.trim().slice(0, 300);
+    editingRecord.updatedAt = new Date().toISOString();
     editingRecord.durationMs = durationMs;
     saveRecords();
     elements.editHistoryDialog.close();
     renderHistory();
     showToast("作業履歴を変更しました");
+  }
+
+  function resumeFromHistory() {
+    if (!editingRecord || editingRecord.date !== localDateKey()) return;
+    elements.resumeHistoryConfirmMessage.textContent =
+      `「${editingRecord.taskName}（${formatRecordDuration(editingRecord.durationMs)}）」を履歴から削除して計測画面へ復元します。`;
+    elements.resumeHistoryConfirmDialog.showModal();
+  }
+
+  function confirmResumeFromHistory() {
+    if (!editingRecord) return;
+    const record = editingRecord;
+    if (state.isRunning) {
+      state.elapsedBeforeStartMs = getElapsedMs();
+      state.isRunning = false;
+      state.startedAt = 0;
+      stopTicking();
+    }
+    snapshotActiveTimer();
+    const tab = createTimerTab(state.nextTimerNumber);
+    state.nextTimerNumber += 1;
+    tab.mode = Object.values(MODES).includes(record.mode) ? record.mode : getDefaultMode();
+    tab.taskName = record.taskName.slice(0, 80);
+    tab.taskMemo = typeof record.memo === "string" ? record.memo.slice(0, 300) : "";
+    const recordStartedAt = new Date(record.firstStartedAt).getTime();
+    tab.firstStartedAt = record.mode !== "manual" && Number.isFinite(recordStartedAt) ? recordStartedAt : 0;
+    tab.elapsedBeforeStartMs = record.durationMs;
+    tab.countdownSessionStartElapsedMs = record.durationMs;
+    tab.hasStarted = true;
+    state.timerTabs.push(tab);
+    applyTimerTab(tab);
+    const recordIndex = state.records.findIndex((item) => item.id === record.id || item === record);
+    if (recordIndex >= 0) state.records.splice(recordIndex, 1);
+    syncInputsFromDuration();
+    timerTabsSignature = "";
+    elements.resumeHistoryConfirmDialog.close();
+    elements.editHistoryDialog.close();
+    elements.historyDialog.close();
+    saveRecords();
+    saveState();
+    render();
+    showToast("履歴を計測画面へ戻しました。開始操作で再開できます");
   }
 
   function deleteHistoryRecord(record) {
@@ -1130,6 +1572,7 @@
   function openAddHistoryDialog() {
     elements.manualDate.value = localDateKey();
     elements.manualTaskInput.value = "";
+    elements.manualMemoInput.value = "";
     elements.manualHoursInput.value = "0";
     elements.manualMinutesInput.value = "0";
     elements.manualSecondsInput.value = "0";
@@ -1184,7 +1627,7 @@
 
   function addManualHistory(event) {
     event.preventDefault();
-    const taskName = elements.manualTaskInput.value.trim();
+    const taskName = resolveTaskName(elements.manualTaskInput.value);
     const durationMs = normalizeManualDurationInputs();
 
     if (durationMs === null) return;
@@ -1197,13 +1640,15 @@
       return;
     }
 
+    const addedAt = now();
     state.records.push({
-      id: `${now()}-${Math.random().toString(16).slice(2)}`,
+      id: `${addedAt}-${Math.random().toString(16).slice(2)}`,
       date: localDateKey(),
-      taskName: taskName.slice(0, 80),
+      taskName,
+      memo: elements.manualMemoInput.value.trim().slice(0, 300),
       durationMs,
       mode: "manual",
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(addedAt).toISOString(),
     });
     saveRecords();
     renderHistoryDateOptions(localDateKey());
@@ -1299,10 +1744,14 @@
       pipWindow.document.head.append(styleLink);
       pipWindow.document.body.className = "is-popup";
       pipWindow.document.body.append(elements.app);
+      popupFitSignature = "";
+      scheduleFitPopupContent();
       pipWindow.document.addEventListener("keydown", handleKeyboard);
       suppressPopupSizeSaveUntil = now() + 1200;
       pipWindow.addEventListener("resize", () => {
         scheduleFitControlButtonText();
+        popupFitSignature = "";
+        scheduleFitPopupContent();
         schedulePopupSizeSave(pipWindow);
       });
       if (!hadSavedSize) {
@@ -1313,6 +1762,10 @@
       pipWindow.addEventListener("pagehide", () => {
         state.isMinimized = false;
         preMinimizePopupSize = null;
+        elements.app.style.zoom = "";
+        elements.app.style.width = "";
+        elements.app.style.maxWidth = "";
+        popupFitSignature = "";
         document.body.classList.toggle("is-popup", new URLSearchParams(location.search).has("popup"));
         document.body.append(elements.app); render();
       });
@@ -1323,6 +1776,14 @@
   async function openCompactWindow() { if (!(await openDocumentPictureInPicture())) openPopupWindow(); }
 
   function handleKeyboard(event) {
+    if (pendingNewDateKey) return;
+    if (isResetConfirmOpen()) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeResetConfirm();
+      }
+      return;
+    }
     if (isTimerNavigationConfirmOpen()) {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -1354,12 +1815,14 @@
     if (["input", "textarea", "button"].includes(event.target.tagName.toLowerCase()) || elements.app.ownerDocument.querySelector("dialog[open]")) return;
     if (event.code === "Space") {
       event.preventDefault();
-      isFinishedCountdown() ? moveToNextTask() : state.isRunning ? pauseTimer() : startTimer();
+      isFinishedCountdown() ? prepareAdditionalCountdown() : state.isRunning ? pauseTimer() : startTimer();
     }
-    else if (event.key.toLowerCase() === "r") resetTimer();
+    else if (event.key.toLowerCase() === "r") requestResetTimer();
   }
 
   function bindEvents() {
+    elements.resetPreviousDayButton.addEventListener("click", resetPreviousDayWork);
+    elements.recordPreviousDayButton.addEventListener("click", recordPreviousDayWork);
     elements.timerTabList.addEventListener("click", (event) => {
       const closeButton = event.target.closest("[data-close-timer-id]");
       if (closeButton) {
@@ -1371,6 +1834,23 @@
     });
     elements.addTimerTabButton.addEventListener("click", addTimerTab);
     elements.settingsButton.addEventListener("click", openSettingsDialog);
+    elements.defaultModeSelect.addEventListener("change", () => {
+      if (!Object.values(MODES).includes(elements.defaultModeSelect.value)) return;
+      localStorage.setItem(DEFAULT_MODE_KEY, elements.defaultModeSelect.value);
+      if (!state.hasStarted && !state.isRunning && state.elapsedBeforeStartMs === 0) {
+        state.mode = elements.defaultModeSelect.value;
+        state.countdownSessionStartElapsedMs = 0;
+        state.finishedAt = 0;
+        saveState();
+        render();
+      }
+      showToast("新しいタイマーの初期モードを変更しました");
+    });
+    elements.aggregationEnabledInput.addEventListener("change", () => {
+      localStorage.setItem(AGGREGATION_ENABLED_KEY, String(elements.aggregationEnabledInput.checked));
+      if (elements.historyDialog.open) renderHistory();
+      showToast(elements.aggregationEnabledInput.checked ? "高度な計測を有効にしました" : "高度な計測を無効にしました");
+    });
     elements.resetPopupSizeButton.addEventListener("click", resetPopupSize);
     elements.resetMinimizedPopupSizeButton.addEventListener("click", resetMinimizedPopupSize);
     elements.cancelTimerNavigationButton.addEventListener("click", closeTimerNavigationConfirm);
@@ -1390,15 +1870,13 @@
     });
     elements.modeTabs.forEach((tab) => tab.addEventListener("click", () => switchMode(tab.dataset.mode)));
     [elements.hoursInput, elements.minutesInput, elements.secondsInput].forEach((input) => input.addEventListener("change", () => {
-      state.countdownDurationMs = getDurationFromInputs();
-      state.elapsedBeforeStartMs = 0; state.finishedAt = 0; state.hasStarted = false;
-      syncInputsFromDuration(); saveState(); render();
+      setCountdownDuration(getDurationFromInputs() / 1000);
     }));
     elements.presetButtons.forEach((button) => button.addEventListener("click", () => setCountdownDuration(Number.parseInt(button.dataset.seconds, 10))));
     elements.taskButton.addEventListener("click", () => openTaskDialog(false));
     elements.taskDialogForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      setTaskName(elements.taskInput.value);
+      setTask(elements.taskInput.value, elements.taskMemoInput.value);
       if (!state.taskName) return;
       const shouldRecord = pendingRecordAfterTaskInput;
       pendingRecordAfterTaskInput = false;
@@ -1417,6 +1895,9 @@
     [elements.editHoursInput, elements.editMinutesInput, elements.editSecondsInput]
       .forEach((input) => input.addEventListener("change", normalizeEditDurationInputs));
     elements.editHistoryForm.addEventListener("submit", updateHistoryRecord);
+    elements.resumeHistoryButton.addEventListener("click", resumeFromHistory);
+    elements.cancelResumeHistoryButton.addEventListener("click", () => elements.resumeHistoryConfirmDialog.close());
+    elements.confirmResumeHistoryButton.addEventListener("click", confirmResumeFromHistory);
     elements.editHistoryDialog.addEventListener("close", () => { editingRecord = null; });
     elements.editDeleteButton.addEventListener("click", () => {
       if (!editingRecord) return;
@@ -1433,13 +1914,24 @@
     elements.closeDialogButtons.forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
     elements.startPauseButton.addEventListener("pointerdown", handleTimerPointerDown);
     elements.startPauseButton.addEventListener("click", handleTimerClick);
-    elements.resetButton.addEventListener("click", resetTimer);
+    elements.compactStartPauseButton.addEventListener("pointerdown", handleTimerPointerDown);
+    elements.compactStartPauseButton.addEventListener("click", handleTimerClick);
+    elements.resetButton.addEventListener("click", requestResetTimer);
+    elements.cancelResetButton.addEventListener("click", closeResetConfirm);
+    elements.confirmResetButton.addEventListener("click", confirmResetTimer);
+    elements.resetConfirmOverlay.addEventListener("click", (event) => {
+      if (event.target === elements.resetConfirmOverlay) closeResetConfirm();
+    });
     elements.nextTaskButton.addEventListener("click", moveToNextTask);
     elements.popupButton.addEventListener("click", openCompactWindow);
     elements.minimizeButton.addEventListener("click", toggleMinimized);
     document.addEventListener("keydown", handleKeyboard);
     window.addEventListener("resize", scheduleFitControlButtonText);
-    window.addEventListener("resize", () => schedulePopupSizeSave(window));
+    window.addEventListener("resize", () => {
+      popupFitSignature = "";
+      scheduleFitPopupContent();
+      schedulePopupSizeSave(window);
+    });
     window.addEventListener("beforeunload", (event) => {
       if (!hasStartedTimer()) return;
       saveState();
@@ -1456,7 +1948,7 @@
     syncInputsFromDuration();
     bindEvents();
     updateDateTime();
-    window.setInterval(updateDateTime, 250);
+    startDateTimeUpdates();
     render();
     if (isPopup) {
       window.requestAnimationFrame(() => applyPopupSize(window, getPreferredPopupSize(window)));
